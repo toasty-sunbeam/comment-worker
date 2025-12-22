@@ -53,7 +53,7 @@ npx wrangler secret put AKISMET_API_KEY
 # Get your API key from https://akismet.com/ (free for personal use)
 
 # Update wrangler.toml with your blog domain
-# Change ALLOWED_ORIGIN and BLOG_URL in [env.production] to your actual domain
+# Change ALLOWED_ORIGIN and BLOG_URL to your actual domain
 
 # Deploy to production
 npm run deploy:production
