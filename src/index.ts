@@ -9,6 +9,10 @@ export interface Env {
   ALLOWED_ORIGIN: string; // your blog domain
   AKISMET_API_KEY: string; // your Akismet API key
   BLOG_URL: string; // your blog URL for Akismet
+  // Optional email notifications. If RESEND_API_KEY is unset, notification is skipped.
+  RESEND_API_KEY?: string; // https://resend.com API key
+  NOTIFY_EMAIL_TO?: string; // where to send the "new comment" email
+  NOTIFY_EMAIL_FROM?: string; // verified sender, e.g. "Blog <comments@jamesharr.is>"
 }
 
 interface CommentSubmission {
@@ -55,7 +59,11 @@ interface GitHubCreatePRResponse {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
     // CORS headers
     const corsHeaders = {
       "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN,
@@ -109,6 +117,14 @@ export default {
 
       // Create the comment file and PR (email is NOT included in stored data)
       const result = await createCommentPR(env, submission);
+
+      // Notify after the response goes out. A mail failure must never fail the
+      // submission or the caller would retry and open a duplicate PR.
+      ctx.waitUntil(
+        sendNotification(env, submission, result.prUrl).catch((error) => {
+          console.error("Failed to send comment notification:", error);
+        })
+      );
 
       return new Response(JSON.stringify({ success: true, pr: result.prUrl }), {
         status: 200,
@@ -401,6 +417,93 @@ async function createCommentPR(
   const pr: GitHubCreatePRResponse = await createPRResponse.json();
 
   return { prUrl: pr.html_url };
+}
+
+/**
+ * Email the blog owner that a comment PR is waiting.
+ *
+ * The PR is opened by the owner's own token, and GitHub does not notify you
+ * about your own actions, so watching the repo does not cover this. Sending
+ * from here is also the only place that has the comment body, the commenter's
+ * email (which is deliberately never committed), and the PR URL together.
+ */
+async function sendNotification(
+  env: Env,
+  submission: CommentSubmission,
+  prUrl: string
+): Promise<void> {
+  // Notifications are opt-in: no key configured, nothing to do.
+  if (!env.RESEND_API_KEY || !env.NOTIFY_EMAIL_TO || !env.NOTIFY_EMAIL_FROM) {
+    return;
+  }
+
+  const name = submission.name.trim();
+  const content = submission.content.trim();
+  // The name reaches an email header, so collapse anything that could break it.
+  const subjectName = name.replace(/\s+/g, " ");
+
+  const details = [
+    `Post:    ${submission.postSlug}`,
+    `Author:  ${name}`,
+    `Email:   ${submission.email?.trim() || "(not provided)"}`,
+    `Website: ${submission.website?.trim() || "(not provided)"}`,
+  ].join("\n");
+
+  const text = `${details}\n\nReview: ${prUrl}\n\n---\n\n${content}\n`;
+
+  // Comment content is untrusted input; escape before it goes into HTML.
+  const html = `
+    <p><strong>New comment on &ldquo;${escapeHtml(
+      submission.postSlug
+    )}&rdquo;</strong></p>
+    <table cellpadding="0" cellspacing="0">
+      <tr><td><strong>Author</strong>&nbsp;&nbsp;</td><td>${escapeHtml(
+        name
+      )}</td></tr>
+      <tr><td><strong>Email</strong>&nbsp;&nbsp;</td><td>${escapeHtml(
+        submission.email?.trim() || "(not provided)"
+      )}</td></tr>
+      <tr><td><strong>Website</strong>&nbsp;&nbsp;</td><td>${escapeHtml(
+        submission.website?.trim() || "(not provided)"
+      )}</td></tr>
+    </table>
+    <blockquote style="border-left:3px solid #ccc;margin:1em 0;padding:0 0 0 1em;white-space:pre-wrap;">${escapeHtml(
+      content
+    )}</blockquote>
+    <p><a href="${escapeHtml(
+      prUrl
+    )}">Review the pull request</a> &mdash; merge to publish, close to reject.</p>
+  `.trim();
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.NOTIFY_EMAIL_FROM,
+      to: env.NOTIFY_EMAIL_TO,
+      subject: `\u{1F4AC} New comment on "${submission.postSlug}" from ${subjectName}`,
+      text,
+      html,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Resend returned ${response.status}: ${await response.text()}`
+    );
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function generateCommentId(): string {

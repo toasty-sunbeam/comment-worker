@@ -120,7 +120,9 @@ const { slug } = Astro.params;
    src/data/comments/my-post-slug/lxyz123-abc456.json
    ```
 4. Worker opens a PR with the comment content visible in the description
-5. You get a GitHub notification
+5. Worker emails you the comment and a link to the PR (if configured — see
+   [Notifications](#notifications); GitHub itself will not notify you, because
+   the PR is opened by your own token)
 6. Review the PR - merge to approve, close to reject
 7. Merging triggers a GitHub Pages rebuild
 8. Comment appears on your site
@@ -190,12 +192,40 @@ To change where comments are stored, update:
 1. `filePath` in the worker's `createCommentPR` function
 2. The content collection path in your Astro config
 
-### Notification
+### Notifications
 
-The worker could be extended to send notifications via:
-- Email (using a service like Resend or SendGrid)
-- Slack webhook
-- Discord webhook
+The worker emails you when a comment PR is opened. This is opt-in: if
+`RESEND_API_KEY`, `NOTIFY_EMAIL_TO`, and `NOTIFY_EMAIL_FROM` are not all set,
+the step is skipped silently.
+
+Do not rely on GitHub notifications instead. The PR is created with your own
+personal access token, and GitHub does not notify you about your own actions,
+so a repo watch will stay quiet no matter how it is configured.
+
+```bash
+npx wrangler secret put RESEND_API_KEY
+# From https://resend.com/ - the free tier covers a personal blog
+
+npx wrangler secret put NOTIFY_EMAIL_TO
+# Your own address
+
+npx wrangler secret put NOTIFY_EMAIL_FROM
+# A verified sender on a domain you control, e.g. "Blog <comments@example.com>"
+```
+
+Resend requires you to verify the sending domain by adding DNS records. Any
+provider with an HTTP API works the same way - swap the `fetch` call in
+`sendNotification`. Cloudflare's old free MailChannels integration was
+discontinued in 2024, so a provider account is required.
+
+The email is sent with `ctx.waitUntil` after the response goes out, and
+failures are logged rather than thrown: a mail outage must not fail the
+submission, or the browser would retry and open a duplicate PR.
+
+Spam never reaches this step. Honeypot hits and Akismet rejections return
+early, so they cost you nothing.
+
+The same hook could drive a Slack or Discord webhook instead.
 
 ## Costs
 
