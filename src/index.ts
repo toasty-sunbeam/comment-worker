@@ -9,10 +9,9 @@ export interface Env {
   ALLOWED_ORIGIN: string; // your blog domain
   AKISMET_API_KEY: string; // your Akismet API key
   BLOG_URL: string; // your blog URL for Akismet
-  // Optional email notifications. If RESEND_API_KEY is unset, notification is skipped.
-  RESEND_API_KEY?: string; // https://resend.com API key
-  NOTIFY_EMAIL_TO?: string; // where to send the "new comment" email
-  NOTIFY_EMAIL_FROM?: string; // verified sender, e.g. "Blog <comments@jamesharr.is>"
+  // Optional Telegram notifications. Both unset means notification is skipped.
+  TELEGRAM_BOT_TOKEN?: string; // from @BotFather
+  TELEGRAM_CHAT_ID?: string; // the chat to notify (yours, from getUpdates)
 }
 
 interface CommentSubmission {
@@ -118,8 +117,8 @@ export default {
       // Create the comment file and PR (email is NOT included in stored data)
       const result = await createCommentPR(env, submission);
 
-      // Notify after the response goes out. A mail failure must never fail the
-      // submission or the caller would retry and open a duplicate PR.
+      // Notify after the response goes out. A notification failure must never
+      // fail the submission, or the caller would retry and open a duplicate PR.
       ctx.waitUntil(
         sendNotification(env, submission, result.prUrl).catch((error) => {
           console.error("Failed to send comment notification:", error);
@@ -420,7 +419,7 @@ async function createCommentPR(
 }
 
 /**
- * Email the blog owner that a comment PR is waiting.
+ * Tell the blog owner on Telegram that a comment PR is waiting.
  *
  * The PR is opened by the owner's own token, and GitHub does not notify you
  * about your own actions, so watching the repo does not cover this. Sending
@@ -432,69 +431,93 @@ async function sendNotification(
   submission: CommentSubmission,
   prUrl: string
 ): Promise<void> {
-  // Notifications are opt-in: no key configured, nothing to do.
-  if (!env.RESEND_API_KEY || !env.NOTIFY_EMAIL_TO || !env.NOTIFY_EMAIL_FROM) {
+  // Notifications are opt-in: nothing configured, nothing to do.
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) {
     return;
   }
 
-  const name = submission.name.trim();
-  const content = submission.content.trim();
-  // The name reaches an email header, so collapse anything that could break it.
-  const subjectName = name.replace(/\s+/g, " ");
+  const text = buildTelegramMessage(submission, prUrl);
 
-  const details = [
-    `Post:    ${submission.postSlug}`,
-    `Author:  ${name}`,
-    `Email:   ${submission.email?.trim() || "(not provided)"}`,
-    `Website: ${submission.website?.trim() || "(not provided)"}`,
-  ].join("\n");
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: env.TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "HTML",
+        // The PR link is the call to action, not a card to scroll past.
+        link_preview_options: { is_disabled: true },
+      }),
+    }
+  );
 
-  const text = `${details}\n\nReview: ${prUrl}\n\n---\n\n${content}\n`;
-
-  // Comment content is untrusted input; escape before it goes into HTML.
-  const html = `
-    <p><strong>New comment on &ldquo;${escapeHtml(
-      submission.postSlug
-    )}&rdquo;</strong></p>
-    <table cellpadding="0" cellspacing="0">
-      <tr><td><strong>Author</strong>&nbsp;&nbsp;</td><td>${escapeHtml(
-        name
-      )}</td></tr>
-      <tr><td><strong>Email</strong>&nbsp;&nbsp;</td><td>${escapeHtml(
-        submission.email?.trim() || "(not provided)"
-      )}</td></tr>
-      <tr><td><strong>Website</strong>&nbsp;&nbsp;</td><td>${escapeHtml(
-        submission.website?.trim() || "(not provided)"
-      )}</td></tr>
-    </table>
-    <blockquote style="border-left:3px solid #ccc;margin:1em 0;padding:0 0 0 1em;white-space:pre-wrap;">${escapeHtml(
-      content
-    )}</blockquote>
-    <p><a href="${escapeHtml(
-      prUrl
-    )}">Review the pull request</a> &mdash; merge to publish, close to reject.</p>
-  `.trim();
-
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: env.NOTIFY_EMAIL_FROM,
-      to: env.NOTIFY_EMAIL_TO,
-      subject: `\u{1F4AC} New comment on "${submission.postSlug}" from ${subjectName}`,
-      text,
-      html,
-    }),
-  });
-
-  if (!response.ok) {
+  // Telegram reports failures both in the status and in an `ok` field.
+  const result = (await response.json()) as { ok?: boolean; description?: string };
+  if (!response.ok || !result.ok) {
     throw new Error(
-      `Resend returned ${response.status}: ${await response.text()}`
+      `Telegram returned ${response.status}: ${result.description ?? "unknown error"}`
     );
   }
+}
+
+// Telegram rejects messages longer than 4096 characters outright, and comments
+// are allowed up to 10000, so the body has to be trimmed to fit.
+const TELEGRAM_MAX_MESSAGE = 4096;
+const TRUNCATION_NOTE = "\n\n[trimmed \u2014 read the full comment in the PR]";
+
+function buildTelegramMessage(
+  submission: CommentSubmission,
+  prUrl: string
+): string {
+  // Collapse whitespace so a multi-line name can't sprawl over the message.
+  const name = submission.name.trim().replace(/\s+/g, " ");
+
+  const header =
+    `\u{1F4AC} <b>New comment on "${escapeHtml(submission.postSlug)}"</b>\n\n` +
+    `<b>From:</b> ${escapeHtml(name)}\n` +
+    `<b>Email:</b> ${escapeHtml(submission.email?.trim() || "(not provided)")}\n` +
+    `<b>Website:</b> ${escapeHtml(
+      submission.website?.trim() || "(not provided)"
+    )}\n\n`;
+
+  const footer = `\n\n<a href="${escapeHtml(
+    prUrl
+  )}">Review the pull request</a>`;
+
+  // Only <b> and <a> are used above; both are core Telegram HTML, so the
+  // parse can't fail on an unsupported tag.
+  const budget = Math.max(
+    0,
+    TELEGRAM_MAX_MESSAGE - header.length - footer.length
+  );
+
+  let body = escapeHtml(submission.content.trim());
+  if (body.length > budget) {
+    body =
+      truncateEscaped(body, Math.max(0, budget - TRUNCATION_NOTE.length)) +
+      TRUNCATION_NOTE;
+  }
+
+  return header + body + footer;
+}
+
+/**
+ * Cut escaped HTML to length without leaving a half-written entity (a stray
+ * "&am") at the end, which would break Telegram's parser.
+ */
+function truncateEscaped(escaped: string, max: number): string {
+  if (escaped.length <= max) {
+    return escaped;
+  }
+
+  const cut = escaped.slice(0, max);
+  const lastAmp = cut.lastIndexOf("&");
+  if (lastAmp !== -1 && !cut.slice(lastAmp).includes(";")) {
+    return cut.slice(0, lastAmp);
+  }
+  return cut;
 }
 
 function escapeHtml(value: string): string {
