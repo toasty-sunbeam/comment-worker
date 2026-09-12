@@ -11,3 +11,8 @@ BLOG_URL = "https://jamesharr.is"
 # - GITHUB_TOKEN: Personal access token with repo scope
 # - GITHUB_REPO: "owner/repo" format
 # - AKISMET_API_KEY: Your Akismet API key (get one at https://akismet.com/)
+#
+# Optional, for "new comment" Telegram notifications. Leave both unset to
+# disable notifications; the worker skips them silently.
+# - TELEGRAM_BOT_TOKEN: Bot token from @BotFather
+# - TELEGRAM_CHAT_ID: The chat to notify (yours)

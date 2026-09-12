@@ -120,7 +120,9 @@ const { slug } = Astro.params;
    src/data/comments/my-post-slug/lxyz123-abc456.json
    ```
 4. Worker opens a PR with the comment content visible in the description
-5. You get a GitHub notification
+5. Worker sends you the comment and a link to the PR on Telegram (if
+   configured — see [Notifications](#notifications); GitHub itself will not
+   notify you, because the PR is opened by your own token)
 6. Review the PR - merge to approve, close to reject
 7. Merging triggers a GitHub Pages rebuild
 8. Comment appears on your site
@@ -190,12 +192,53 @@ To change where comments are stored, update:
 1. `filePath` in the worker's `createCommentPR` function
 2. The content collection path in your Astro config
 
-### Notification
+### Notifications
 
-The worker could be extended to send notifications via:
-- Email (using a service like Resend or SendGrid)
-- Slack webhook
-- Discord webhook
+The worker messages you on Telegram when a comment PR is opened. This is
+opt-in: if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are not both set, the
+step is skipped silently.
+
+Do not rely on GitHub notifications instead. The PR is created with your own
+personal access token, and GitHub does not notify you about your own actions,
+so a repo watch will stay quiet no matter how it is configured.
+
+**Get a bot token.** In Telegram, message [@BotFather](https://t.me/BotFather),
+send `/newbot`, and follow the prompts. It replies with a token.
+
+**Get your chat ID.** Send your new bot any message, then:
+
+```bash
+curl "https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates"
+```
+
+Read `result[0].message.chat.id` out of the response. A bot cannot start a
+conversation with you, so that first message from you is required.
+
+**Set the secrets.**
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+No domain, no DNS, and no deliverability concerns - unlike email, which needs
+a provider account and a verified sending domain.
+
+The message is sent with `ctx.waitUntil` after the response goes out, and
+failures are logged rather than thrown: an outage at Telegram must not fail
+the submission, or the browser would retry and open a duplicate PR.
+
+Messages use `parse_mode: "HTML"` with only `<b>` and `<a>`, both core
+Telegram tags, so the parse cannot fail on an unsupported tag. Comment text is
+escaped, and because Telegram rejects anything over 4096 characters while
+comments are allowed up to 10000, long bodies are trimmed - without leaving a
+half-written HTML entity at the cut.
+
+Spam never reaches this step. Honeypot hits and Akismet rejections return
+early, so they cost you nothing.
+
+The same hook could drive email, a Slack webhook, or ntfy instead - it is one
+`fetch` call in `sendNotification`.
 
 ## Costs
 
